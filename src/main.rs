@@ -147,7 +147,7 @@ pub struct Config {
     #[clap(long)]
     fixed_transfers_count: Option<u8>,
     #[clap(long)]
-    default_transfer_address: Option<Address>,
+    fixed_transfer_receiver_address: Option<Address>,
     #[clap(long)]
     #[serde(default)]
     show_wallets_only: bool,
@@ -229,7 +229,7 @@ async fn main() -> Result<(), Error> {
         let mut keys = keys.clone();
         keys.swap_remove(wallet.get_public_key());
 
-        spawn_task(format!("wallet-#{}", i), generate_txs(i, wallet, keys, config.fixed_transfers_count, config.default_transfer_address.clone()))
+        spawn_task(format!("wallet-#{}", i), generate_txs(i, wallet, keys, config.fixed_transfers_count, config.fixed_transfer_receiver_address.clone()))
     }).collect::<Vec<_>>();
 
     for handle in handles {
