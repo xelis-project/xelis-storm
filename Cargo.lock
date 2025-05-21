@@ -3320,6 +3320,7 @@ dependencies = [
  "anyhow",
  "clap",
  "indexmap",
+ "lazy_static",
  "log",
  "rand 0.9.1",
  "serde",

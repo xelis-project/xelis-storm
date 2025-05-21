@@ -1,13 +1,33 @@
-use std::{ops::ControlFlow, path::{Path, MAIN_SEPARATOR}, sync::Arc, time::Duration};
+use std::{
+    ops::ControlFlow,
+    path::{Path, MAIN_SEPARATOR},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc
+    },
+    time::{Duration, Instant}
+};
 
 use anyhow::Error;
 use clap::Parser;
 use indexmap::IndexSet;
+use lazy_static::lazy_static;
 use log::{error, info};
 use rand::random;
 use serde::{Deserialize, Serialize};
-use tokio::time::sleep;
+use tokio::{
+    sync::{
+        mpsc::{
+            channel,
+            Receiver,
+            Sender
+        },
+        Mutex
+    },
+    time::sleep
+};
 use xelis_common::{
+    async_handler,
     config::XELIS_ASSET,
     crypto::{
         ecdlp,
@@ -18,19 +38,22 @@ use xelis_common::{
     },
     network::Network,
     prompt::{
-        default_logs_datetime_format,
-        is_maybe_dir,
+        default_logs_datetime_format, is_maybe_dir,
+        Color,
         LogLevel,
         ModuleConfig,
         Prompt
     },
     tokio::spawn_task,
-    transaction::builder::{
-        FeeBuilder,
-        TransactionTypeBuilder,
-        TransferBuilder
+    transaction::{
+        builder::{
+            FeeBuilder,
+            TransactionTypeBuilder,
+            TransferBuilder
+        },
+        Transaction
     },
-    utils::format_xelis
+    utils::{format_hashrate, format_xelis}
 };
 use xelis_wallet::{
     config::{
@@ -163,6 +186,11 @@ impl ecdlp::ProgressTableGenerationReportFunction for LogProgressTableGeneration
     }
 }
 
+static HASHRATE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+lazy_static! {
+    static ref HASHRATE_LAST_TIME: Mutex<Instant> = Mutex::new(Instant::now());
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let mut config = Config::parse();
@@ -171,7 +199,7 @@ async fn main() -> Result<(), Error> {
     }
 
     let log_config = config.log;
-    let _prompt = Prompt::new(
+    let prompt = Prompt::new(
         log_config.log_level,
         &log_config.logs_path,
         &log_config.filename_log,
@@ -225,21 +253,82 @@ async fn main() -> Result<(), Error> {
         return Ok(())
     }
 
-    let handles = wallets.into_iter().enumerate().map(|(i, wallet)| {
+    let (sender, receiver) = channel(1024);
+
+    let handle = spawn_task("submit", submit_transaction(receiver));
+
+    let mut handles = wallets.into_iter().enumerate().map(|(i, wallet)| {
         let mut keys = keys.clone();
         keys.swap_remove(wallet.get_public_key());
 
-        spawn_task(format!("wallet-#{}", i), generate_txs(i, wallet, keys, config.fixed_transfers_count, config.fixed_transfer_receiver_address.clone()))
+        spawn_task(format!("wallet-#{}", i), generate_txs(
+            i,
+            wallet,
+            keys,
+            config.fixed_transfers_count,
+            config.fixed_transfer_receiver_address.clone(),
+            sender.clone(),
+        ))
     }).collect::<Vec<_>>();
 
+    handles.push(handle);
+
+    let closure = |_: &_, _: _| async {
+        let wallets_str = format!(
+            "{}: {}",
+            prompt.colorize_string(Color::Yellow, "Wallets"),
+            prompt.colorize_string(Color::Green, &format!("{}", config.from_n_wallets)),
+        );
+        // let wallets_str = format!(
+        //     "{}: {}",
+        //     prompt.colorize_string(Color::Yellow, "Transfers"),
+        //     prompt.colorize_string(Color::Green, &format!("{}", config.fixed_transfers_count)),
+        // );
+        let hashrate = {
+            let mut last_time = HASHRATE_LAST_TIME.lock().await;
+            let counter = HASHRATE_COUNTER.swap(0, Ordering::SeqCst);
+
+            let hashrate = 1000f64 / (last_time.elapsed().as_millis() as f64 / counter as f64);
+            *last_time = Instant::now();
+
+            prompt.colorize_string(Color::Green, &format!("{}", format_hashrate(hashrate)))
+        };
+
+        Ok(
+            format!(
+                "{} | {} | {} {} ",
+                prompt.colorize_string(Color::Blue, "XELIS Storm"),
+                wallets_str,
+                hashrate,
+                prompt.colorize_string(Color::BrightBlack, ">>")
+            )
+        )
+    };
+
+    prompt.start(Duration::from_secs(1), Box::new(async_handler!(closure)), None).await?;
+
     for handle in handles {
-        handle.await.unwrap();
+        handle.abort();
     }
 
     Ok(())
 }
 
-pub async fn generate_txs(i: usize, wallet: Arc<Wallet>, keys: IndexSet<PublicKey>, fixed_transfers_count: Option<u8>, default_transfer_address: Option<Address>) {
+pub async fn submit_transaction(mut receiver: Receiver<(Transaction, Arc<Wallet>, usize)>) {
+    while let Some((tx, wallet, i)) = receiver.recv().await {
+        let start = Instant::now();
+        if let Err(e) = wallet.submit_transaction(&tx).await {
+            error!("Error on submit from wallet #{}: {}", i, e);
+            let mut storage = wallet.get_storage().write().await;
+            storage.clear_tx_cache();
+            storage.delete_unconfirmed_balances().await;
+        } else {
+            info!("TX {} submitted from wallet #{} in {:?}", tx.hash(), i, start.elapsed());
+        }
+    }
+}
+
+pub async fn generate_txs(i: usize, wallet: Arc<Wallet>, keys: IndexSet<PublicKey>, fixed_transfers_count: Option<u8>, default_transfer_address: Option<Address>, sender: Sender<(Transaction, Arc<Wallet>, usize)>) {
     loop {
         let transfers_count = fixed_transfers_count.unwrap_or_else(|| random::<u8>().max(1));
         let transfers = (0..transfers_count).map(|_| {
@@ -265,16 +354,15 @@ pub async fn generate_txs(i: usize, wallet: Arc<Wallet>, keys: IndexSet<PublicKe
             }
         }).collect();
 
-        match wallet.create_transaction(TransactionTypeBuilder::Transfers(transfers), FeeBuilder::Boost(0)).await {
+        let res = wallet.create_transaction(TransactionTypeBuilder::Transfers(transfers), FeeBuilder::Boost(0)).await;
+        HASHRATE_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        match res {
             Ok(tx) => {
-                if let Err(e) = wallet.submit_transaction(&tx).await {
-                    error!("Error on submit from wallet #{}: {}", i, e);
-                    let mut storage = wallet.get_storage().write().await;
-                    storage.clear_tx_cache();
-                    storage.delete_unconfirmed_balances().await;
-                } else {
-                    info!("TX {} submitted from wallet #{}", tx.hash(), i);
-                }
+                if sender.send((tx, wallet.clone(), i)).await.is_err() {
+                    info!("Exiting from wallet #{}", i);
+                    break;
+                };
             }
             Err(e) => {
                 error!("Error while building TX on wallet #{}: {}", i, e);
