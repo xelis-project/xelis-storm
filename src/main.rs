@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     ops::ControlFlow,
     path::{Path, MAIN_SEPARATOR},
     sync::{
@@ -16,14 +17,7 @@ use log::{error, info};
 use rand::random;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{
-        mpsc::{
-            channel,
-            Receiver,
-            Sender
-        },
-        Mutex
-    },
+    sync::Mutex,
     time::sleep
 };
 use xelis_common::{
@@ -45,13 +39,10 @@ use xelis_common::{
         Prompt
     },
     tokio::spawn_task,
-    transaction::{
-        builder::{
-            FeeBuilder,
-            TransactionTypeBuilder,
-            TransferBuilder
-        },
-        Transaction
+    transaction::builder::{
+        FeeBuilder,
+        TransactionTypeBuilder,
+        TransferBuilder
     },
     utils::{format_hashrate, format_xelis}
 };
@@ -238,7 +229,12 @@ async fn main() -> Result<(), Error> {
         wallet.set_online_mode_with_api(api.clone(), true).await?;
         wallet.set_history_scan(false);
 
-        info!("Wallet #{}: {}", i, wallet.get_address());
+        let addr = wallet.get_address();
+        info!("Wallet #{}: {}", i, addr);
+        if let Some(network_handler) = wallet.get_network_handler().lock().await.as_ref() {
+            network_handler.sync_head_state(&addr, Some(HashSet::from_iter([XELIS_ASSET])), None, true, true).await?;
+        }
+
         keys.insert(wallet.get_public_key().clone());
         wallets.push(wallet);
     }
@@ -253,11 +249,7 @@ async fn main() -> Result<(), Error> {
         return Ok(())
     }
 
-    let (sender, receiver) = channel(1024);
-
-    let handle = spawn_task("submit", submit_transaction(receiver));
-
-    let mut handles = wallets.into_iter().enumerate().map(|(i, wallet)| {
+    let handles = wallets.into_iter().enumerate().map(|(i, wallet)| {
         let mut keys = keys.clone();
         keys.swap_remove(wallet.get_public_key());
 
@@ -267,11 +259,8 @@ async fn main() -> Result<(), Error> {
             keys,
             config.fixed_transfers_count,
             config.fixed_transfer_receiver_address.clone(),
-            sender.clone(),
         ))
     }).collect::<Vec<_>>();
-
-    handles.push(handle);
 
     let closure = |_: &_, _: _| async {
         let wallets_str = format!(
@@ -279,11 +268,6 @@ async fn main() -> Result<(), Error> {
             prompt.colorize_string(Color::Yellow, "Wallets"),
             prompt.colorize_string(Color::Green, &format!("{}", config.from_n_wallets)),
         );
-        // let wallets_str = format!(
-        //     "{}: {}",
-        //     prompt.colorize_string(Color::Yellow, "Transfers"),
-        //     prompt.colorize_string(Color::Green, &format!("{}", config.fixed_transfers_count)),
-        // );
         let hashrate = {
             let mut last_time = HASHRATE_LAST_TIME.lock().await;
             let counter = HASHRATE_COUNTER.swap(0, Ordering::SeqCst);
@@ -314,21 +298,7 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn submit_transaction(mut receiver: Receiver<(Transaction, Arc<Wallet>, usize)>) {
-    while let Some((tx, wallet, i)) = receiver.recv().await {
-        let start = Instant::now();
-        if let Err(e) = wallet.submit_transaction(&tx).await {
-            error!("Error on submit from wallet #{}: {}", i, e);
-            let mut storage = wallet.get_storage().write().await;
-            storage.clear_tx_cache();
-            storage.delete_unconfirmed_balances().await;
-        } else {
-            info!("TX {} submitted from wallet #{} in {:?}", tx.hash(), i, start.elapsed());
-        }
-    }
-}
-
-pub async fn generate_txs(i: usize, wallet: Arc<Wallet>, keys: IndexSet<PublicKey>, fixed_transfers_count: Option<u8>, default_transfer_address: Option<Address>, sender: Sender<(Transaction, Arc<Wallet>, usize)>) {
+pub async fn generate_txs(i: usize, wallet: Arc<Wallet>, keys: IndexSet<PublicKey>, fixed_transfers_count: Option<u8>, default_transfer_address: Option<Address>) {
     loop {
         let transfers_count = fixed_transfers_count.unwrap_or_else(|| random::<u8>().max(1));
         let transfers = (0..transfers_count).map(|_| {
@@ -359,10 +329,15 @@ pub async fn generate_txs(i: usize, wallet: Arc<Wallet>, keys: IndexSet<PublicKe
 
         match res {
             Ok(tx) => {
-                if sender.send((tx, wallet.clone(), i)).await.is_err() {
-                    info!("Exiting from wallet #{}", i);
-                    break;
-                };
+                let start = Instant::now();
+                if let Err(e) = wallet.submit_transaction(&tx).await {
+                    error!("Error on submit from wallet #{}: {}", i, e);
+                    let mut storage = wallet.get_storage().write().await;
+                    storage.clear_tx_cache();
+                    storage.delete_unconfirmed_balances().await;
+                } else {
+                    info!("TX {} submitted from wallet #{} in {:?}", tx.hash(), i, start.elapsed());
+                }
             }
             Err(e) => {
                 error!("Error while building TX on wallet #{}: {}", i, e);
