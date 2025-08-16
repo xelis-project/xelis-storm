@@ -232,7 +232,7 @@ async fn main() -> Result<(), Error> {
         let addr = wallet.get_address();
         info!("Wallet #{}: {}", i, addr);
         if let Some(network_handler) = wallet.get_network_handler().lock().await.as_ref() {
-            network_handler.sync_head_state(&addr, Some(HashSet::from_iter([XELIS_ASSET])), None, true, true).await?;
+            network_handler.sync_head_state(&addr, Some(&HashSet::from_iter([XELIS_ASSET])), None, true, true).await?;
         }
 
         keys.insert(wallet.get_public_key().clone());
