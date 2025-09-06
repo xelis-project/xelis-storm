@@ -40,7 +40,6 @@ use xelis_common::{
     },
     tokio::spawn_task,
     transaction::builder::{
-        FeeBuilder,
         TransactionTypeBuilder,
         TransferBuilder
     },
@@ -324,7 +323,7 @@ pub async fn generate_txs(i: usize, wallet: Arc<Wallet>, keys: IndexSet<PublicKe
             }
         }).collect();
 
-        let res = wallet.create_transaction(TransactionTypeBuilder::Transfers(transfers), FeeBuilder::Boost(0)).await;
+        let res = wallet.create_transaction(TransactionTypeBuilder::Transfers(transfers), Default::default(), Default::default()).await;
         HASHRATE_COUNTER.fetch_add(1, Ordering::SeqCst);
 
         match res {
