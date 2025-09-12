@@ -177,6 +177,7 @@ pub struct Config {
     show_wallets_only: bool,
     /// Maximum fee per transaction
     /// By default, the fee max will be the same as TX fee
+    #[clap(long)]
     max_fee_per_tx: Option<u64>,
 }
 
