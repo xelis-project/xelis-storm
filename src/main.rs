@@ -32,7 +32,8 @@ use xelis_common::{
     },
     network::Network,
     prompt::{
-        default_logs_datetime_format, is_maybe_dir,
+        default_logs_datetime_format,
+        is_maybe_dir,
         Color,
         LogLevel,
         ModuleConfig,
@@ -147,23 +148,36 @@ pub struct Config {
     #[clap(long, default_value_t = default_wallets_count())]
     #[serde(default = "default_wallets_count")]
     from_n_wallets: usize,
+    /// Directory to store the wallets
+    /// By default it will be wallets/ of the current directory.
     #[clap(long, default_value_t = default_wallets_dir())]
     wallets_dir: String,
+    /// Network to use
     #[clap(long, default_value_t = Network::Testnet)]
     network: Network,
     /// Precopmuted tables configuration
     #[clap(flatten)]
     precomputed_tables: PrecomputedTablesConfig,
+    /// Daemon address
+    /// By default, try to connect to a local daemon
     #[clap(long, default_value_t = default_daemon_address())]
     #[serde(default = "default_daemon_address")]
     daemon_address: String,
+    /// If set, each transfer will contain this number of transfers
+    /// By default, a random number between 1 and 255 will be used
     #[clap(long)]
     fixed_transfers_count: Option<u8>,
+    /// If set, all transfers will be sent to this address
+    /// By default, a random address will be generated for each transfer
     #[clap(long)]
     fixed_transfer_receiver_address: Option<Address>,
+    /// If set to true, the program will only show the wallets and their balances, then exit
     #[clap(long)]
     #[serde(default)]
     show_wallets_only: bool,
+    /// Maximum fee per transaction
+    /// By default, the fee max will be the same as TX fee
+    max_fee_per_tx: Option<u64>,
 }
 
 /// This struct is used to log the progress of the table generation
@@ -258,6 +272,7 @@ async fn main() -> Result<(), Error> {
             keys,
             config.fixed_transfers_count,
             config.fixed_transfer_receiver_address.clone(),
+            config.max_fee_per_tx,
         ))
     }).collect::<Vec<_>>();
 
@@ -297,7 +312,7 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn generate_txs(i: usize, wallet: Arc<Wallet>, keys: IndexSet<PublicKey>, fixed_transfers_count: Option<u8>, default_transfer_address: Option<Address>) {
+pub async fn generate_txs(i: usize, wallet: Arc<Wallet>, keys: IndexSet<PublicKey>, fixed_transfers_count: Option<u8>, default_transfer_address: Option<Address>, max_fee_per_tx: Option<u64>) {
     loop {
         let transfers_count = fixed_transfers_count.unwrap_or_else(|| random::<u8>().max(1));
         let transfers = (0..transfers_count).map(|_| {
@@ -323,7 +338,7 @@ pub async fn generate_txs(i: usize, wallet: Arc<Wallet>, keys: IndexSet<PublicKe
             }
         }).collect();
 
-        let res = wallet.create_transaction(TransactionTypeBuilder::Transfers(transfers), Default::default(), Default::default()).await;
+        let res = wallet.create_transaction(TransactionTypeBuilder::Transfers(transfers), Default::default(), Default::default(), max_fee_per_tx).await;
         HASHRATE_COUNTER.fetch_add(1, Ordering::SeqCst);
 
         match res {
