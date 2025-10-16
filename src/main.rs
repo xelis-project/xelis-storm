@@ -317,12 +317,10 @@ pub async fn generate_txs(i: usize, wallet: Arc<Wallet>, keys: IndexSet<PublicKe
     loop {
         let transfers_count = fixed_transfers_count.unwrap_or_else(|| random::<u8>().max(1));
         let transfers = (0..transfers_count).map(|_| {
-            let destination = if keys.is_empty() {
-                if let Some(address) = default_transfer_address.as_ref() {
+            let destination = if let Some(address) = default_transfer_address.as_ref() {                
                     address.get_public_key().clone()
-                } else {
-                    KeyPair::new().get_public_key().compress()
-                }
+            } else if keys.is_empty() {
+                KeyPair::new().get_public_key().compress()
             } else {
                 let index = random::<u8>() as usize % keys.len();
                 keys.get_index(index)
